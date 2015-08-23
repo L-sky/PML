@@ -1,0 +1,397 @@
+---
+title: "PML-Writeup"
+author: "Kostiantyn Lapchevskyi"
+output: html_document
+---
+
+## Summary
+
+<b>Input:</b> dataset that containes measurements of different (correct and incorrect) executions of specific type of activity.<br/>
+<b>Output:</b> model that capable to recognize to which category of executions belongs given one record.<br/>
+<b>Source of the data:</b> http://groupware.les.inf.puc-rio.br/har (Weight Lifting Exercises Dataset).<br/>
+<b>Reference paper:</b> Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.<br/>
+<b>Milestones of the work:</b> exploratory data analysis (rejection of 67 variables) - preprocessing (rejection of 39 variables) - building of predictive model (multinomial neural network).<br/>
+b<>Performance of the model:</b> >95% accuracy on cross validation set without adjustments of parameters.
+
+## Attach libraries
+
+```{r}
+library(knitr)
+library(dplyr, warn.conflicts = FALSE)
+library(nnet, warn.conflicts = FALSE)
+library(caret, warn.conflicts = FALSE, quietly = TRUE)
+```
+
+## Read the data
+
+```{r}
+train <- read.csv("pml-training.csv")
+```
+
+## Exploratory data analysis
+
+First step is to <b>check missed data</b>. To do so, let's define a function that calculates a fraction of NAs in a given vector and returns the result of comparing to the threshold.
+```{r}
+excessive_var <- function(x, threshold = 1){
+    if (sum(is.na(x))*1.0/length(x) < threshold) return (FALSE)
+    else return (TRUE)
+}
+```
+
+<b>Choose some benchmarks.</b>
+```{r}
+t_001 <- sapply(train, excessive_var, threshold = 0.01)
+t_097 <- sapply(train, excessive_var, threshold = 0.97)
+t_098 <- sapply(train, excessive_var, threshold = 0.98)
+```
+
+<b>Tidy up and print the obtained result.</b>
+```{r}
+stat_1 <- data.frame(row.names = c("Percent of NAs higher than", "Number of variables"))
+stat_1 <- cbind(stat_1, c("1 %", sum(t_001)), c("97 %", sum(t_097)), c("98 %", sum(t_098)))
+kable(stat_1, col.names = c("t_001", "t_097", "t_098"))
+```
+
+Easy to see that we have 67 variables almost without relevant data. Note: lower benchmark can be misleading. Other variables can have missed data also (not marked in a proper way though).
+
+Let's <b>explore a bit more</b> about these <b>67 variables.</b>
+```{r}
+train_67 <- train[,t_001]
+```
+
+<b>What are the types of them?</b>
+```{r}
+summary(factor(sapply(train_67, class)))
+```
+
+<b>Only quantitative ones.</b> <b>Is there a reason for it?</b> Let's check the first word in the names of the mentioned variables. (And other words as one package).
+```{r}
+summary(factor(sapply(strsplit(names(train_67), split = "_"), function(x){return (x[1])})))
+summary(factor(sapply(strsplit(names(train_67), split = "_"), function(x){return (x[2:3])})))
+
+## Frankly speaking, right now the only one obvious achievement - caught typo "picth". If you want to see all of them, run the code below. 
+## names(train)[grep("picth", strsplit(names(train), "_"))]
+```
+
+It may be a good idea to explore further, but for the sake of simplicity it's  better to stop right here and assume that those 67 variables provide data from some additional sensors which are not necessary for the analysis. 
+
+<b>We started with 160 variables, so at this point we have only 93.</b>
+```{r}
+train_93 <- train[, !t_001]
+```
+
+<b>Quick check (NAs).</b>
+```{r}
+sum(is.na(train_93))
+```
+
+None of them (as expected).
+
+<b>Check the types of the variables.</b>
+```{r}
+summary(factor(sapply(train_93, class)))
+```
+
+<b>Let's explore factor variables.</b>
+```{r, results='hide'}
+summary(train_93[,sapply(train_93, class)=="factor"])
+```
+
+I suppressed the output of the function above (it's relatively large), so you may want to run it on your own machine. But anyway, this output gives some crucial info about variables. There is an almost equal partition of data records among persons (user\_name), the same for results (classe). Most likely the same for cvtd\_timestamp, but it's not completely clear, because of random order of time samples.  new_window variable is highly skewed. Other variables have only few data records, most of which are exeptions "division by zero". 
+
+<b>Check the number of the missed data records, for each variable.</b>
+```{r, results='hide'}
+missed <- sapply(train_93[,sapply(train_93, class)=="factor"], function(x){return(sum(x==""))})
+```
+
+Output of the last chunk also relatively large, hence suppressed. But we can see it also in compressed form below. (first line is a number of missed data records, second line is a frequency of occurrence).
+```{r}
+summary(factor(missed))
+```
+
+As mentioned above, variable <b>"new_window" is highly skewed.</b> It seems to be very suspicious. Let's check those data records for which it "yes". And saying beforehand these results worth to be printed.
+```{r}
+sapply(train_93[train_93$new_window=="yes",sapply(train_93, class)=="factor"], function(x){return(sum(x==""))})
+sapply(train_67[train_93$new_window=="yes",], function(x){return(sum(is.na(x)))})
+```
+
+This bunch of zeros means nothing else, but the fact that we have <b>complete cases every time when variable "new_window" is equal to "yes".</b> Obviously, it comes from particularities of the experiment. 
+
+Note: for the sake of simplicity we disregard those 33 almost empty variables and new_window, but we owe to memorize these result, because they may lead to constructing much more accurate model.
+
+Next step is to <b>check numeric and integer variables.</b>
+
+```{r}
+all(sapply(train_93[,sapply(train_93, class)=="numeric"], function(x){all(x!="")}))
+all(sapply(train_93[,sapply(train_93, class)=="integer"], function(x){all(x!="")}))
+```
+
+So there are <b>no missed data records.</b>
+
+Let's see closer at variables.
+```{r, results='hide'}
+summary(train_93[,sapply(train_93, class)=="numeric"])
+summary(train_93[,sapply(train_93, class)=="integer"])
+```
+
+(The same issue with large output). Nothing special about numeric variables. Integer variables: <b>X</b> is just an index, similar stands for <b>timestamps</b> and <b>num_window</b>, so we can <b>omit these variables</b>. 
+
+## Preprocessing of the data
+
+<b>Selection.</b><br/>
+First step is to <b>select desired data</b> from initial dataset (actually, we can use train\_93, because nothing from train\_67 in game).
+Reminder: we need all numeric variables, integer variables (except X, raw\_timestamp\_part\_1, raw\_timestamp\_part\_2 and num\_window) and 2 factor variables (user\_name, classe). Note: we omit cvtd\_timestamp for the same reason as the other timestamp variables.
+```{r}
+base <- (sapply(train_93, class)=="integer")|(sapply(train_93, class)=="numeric")
+base[c(2,93)] <- TRUE ## user_name, classe
+base[c(1,3,4,7)] <- FALSE ## X, raw_timestamp_part_1, raw_timestamp_part_2, num_window
+train_selected <- train_93[,base]
+```
+
+<b>Separation of cross-validation set.</b>
+```{r}
+set.seed(100195) ## reproducibility
+train_index <- createDataPartition(train_selected$classe, p=0.6, list=FALSE)
+train_postselected <- train_selected[train_index,]
+cross_validation <- train_selected[-train_index,]
+## train_selected %>% group_by(user_name) %>% summarise(sum(classe=="A"), sum(classe=="B"), sum(classe=="C"), sum(classe=="D"), sum(classe=="E"))
+## commented code above allows to see distribution of records across classes among persons.
+```
+
+<b>Normalization.</b><br/>
+It should be done separately for each person. Note: totally different ranges of values of variables.<br/>For this purpose define scaling function, which use base one (scale) with parameters: center equal to minimum value in vector and scale equal to difference between maximum and minimum values in vector. 
+```{r}
+scaling <- function(data, data_min, data_scale){
+    for(i in 1:nrow(data_min)){
+        for(j in 2:(ncol(data)-1)){
+            x <- matrix(data[as.integer(data$user_name)==i, j])
+            ## Handle issues with division by zero. 
+            ## Sources: jeremy (roll,pitch,yaw_arm) and adelmo (roll,pitch,yaw_forearm)
+            ## Reason: 0 variability of these variables
+            if (data_scale[i,j]==0) {data_scale[i,j] <- 1}
+            data[as.integer(data$user_name)==i, j] <- 
+                scale(x,
+                      center = unlist(rep(data_min[i,j], times = ncol(x))), 
+                      scale = unlist(rep(data_scale[i,j], times = ncol(x))))
+            }
+        }
+    return (data)
+    }
+```
+
+```{r}
+train_person_max <- dplyr::select(train_postselected, -classe) %>% group_by(user_name) %>% summarise_each(funs(max))
+train_person_min <- dplyr::select(train_postselected, -classe) %>% group_by(user_name) %>% summarise_each(funs(min))
+train_person_scale <- train_person_max
+train_person_scale[,-1] <- train_person_max[,-1] - train_person_min[,-1]
+```
+
+```{r}
+train_norm <- scaling(train_postselected, train_person_min, train_person_scale)
+## in case if you'd like to look at data (check if variables are skewed, or not)
+## ggplot(d,aes(x = value)) + facet_wrap(~variable,scales = "free_x") + geom_histogram()
+```
+
+Thus, everything is ready to be passed to machine learning algorithm.
+
+## Predictive model
+
+<b>Neural network</b><br/>
+<b>Apply separately for each person</b> in order to get better performance of the algorithm. Note: we need no generalization beyond former 6 persons.<br/><br/><b>Separate parts of data by user_name.</b>
+```{r}
+train_adelmo <- train_norm[train_norm$user_name=="adelmo",]
+train_carlitos <- train_norm[train_norm$user_name=="carlitos",]
+train_charles <- train_norm[train_norm$user_name=="charles",]
+train_eurico <- train_norm[train_norm$user_name=="eurico",]
+train_jeremy <- train_norm[train_norm$user_name=="jeremy",]
+train_pedro <- train_norm[train_norm$user_name=="pedro",]
+```
+
+<b>Apply neural network model for each case.</b>
+```{r, results='hide'}
+set.seed(100195) ## reproducibility
+model_adelmo <- multinom(classe~.-user_name, train_adelmo)
+model_carlitos <- multinom(classe~.-user_name, train_carlitos)
+model_charles <- multinom(classe~.-user_name, train_charles)
+model_eurico <- multinom(classe~.-user_name, train_eurico)
+model_jeremy <- multinom(classe~.-user_name, train_jeremy)
+model_pedro <- multinom(classe~.-user_name, train_pedro)
+```
+
+<b>Try to predict on the same sample of the data.</b>
+```{r}
+p_train_adelmo <- predict(model_adelmo, type = "prob", newdata = train_adelmo)
+p_train_carlitos <- predict(model_carlitos, type = "prob", newdata = train_carlitos)
+p_train_charles <- predict(model_charles, type = "prob", newdata = train_charles)
+p_train_eurico <- predict(model_eurico, type = "prob", newdata = train_eurico)
+p_train_jeremy <- predict(model_jeremy, type = "prob", newdata = train_jeremy)
+p_train_pedro <- predict(model_pedro, type = "prob", newdata = train_pedro)
+```
+
+###Try to predict on the cross validation set
+
+<b>Normalization.</b>
+```{r}
+cross_norm <- scaling(cross_validation, train_person_min, train_person_scale)
+```
+
+<b>Separation of data.</b>
+```{r}
+cross_adelmo <- cross_norm[cross_norm$user_name=="adelmo",]
+cross_carlitos <- cross_norm[cross_norm$user_name=="carlitos",]
+cross_charles <- cross_norm[cross_norm$user_name=="charles",]
+cross_eurico <- cross_norm[cross_norm$user_name=="eurico",]
+cross_jeremy <- cross_norm[cross_norm$user_name=="jeremy",]
+cross_pedro <- cross_norm[cross_norm$user_name=="pedro",]
+```
+
+<b>Application of prediction model.</b>
+```{r}
+p_cross_adelmo <- predict(model_adelmo, type = "prob", newdata = cross_adelmo)
+p_cross_carlitos <- predict(model_carlitos, type = "prob", newdata = cross_carlitos)
+p_cross_charles <- predict(model_charles, type = "prob", newdata = cross_charles)
+p_cross_eurico <- predict(model_eurico, type = "prob", newdata = cross_eurico)
+p_cross_jeremy <- predict(model_jeremy, type = "prob", newdata = cross_jeremy)
+p_cross_pedro <- predict(model_pedro, type = "prob", newdata = cross_pedro)
+```
+
+## Comparison of perfomance on training and cross validation sets
+
+```{r}
+performance <- function(name, set) {
+    ## retrieve variable by constructed name (string)
+    prediction <- get(paste("p_",set,"_",name, sep = "")) 
+    data <- get(paste(set,"_",name, sep = ""))
+    temp <- 0
+    for(i in 1:nrow(data)){
+        ## create logical vector which represent if prediction was correct
+        temp[i] <- (names(which.max(prediction[i,]))==as.character(data$classe[i]))
+        }
+    return (sum(temp)/length(temp))
+    }
+```
+
+```{r}
+train_vs_cross <- as.data.frame(rbind(sapply(as.character(levels(train_postselected$user_name)), performance, set = "train"), 
+                           sapply(as.character(levels(train_postselected$user_name)), performance, set = "cross")))
+row.names(train_vs_cross) <- c("training set", "cross validation set")
+kable(train_vs_cross) 
+```
+
+At the first sight at performance on training set it seems like we have overlearned neural network, but on the other hand we don't have significant drop of accuracy on cross validation data set. Even more, the biggest one happened for the lowest prior accuracy.
+
+Note: we can use accuracy on cross validation dataset as an optimization parameter, which we wowuld like to optimize adjusting other parameters (e.g number of iterations, number of units in the hidden layer).
+
+## Optimization 
+
+Let's try do so for the model with the lowest performance. Maximum number of iterations (maxit) is a parameter to adjust.
+
+```{r,results='hide'}
+max_cross <- 0
+max_cross_iter <- 0
+for (i in 80:110) { ## default value of maxit is 100
+    model_jeremy <- multinom(classe~.-user_name, train_jeremy, maxit=i)
+    p_cross_jeremy <- predict(model_jeremy, type = "prob", newdata = cross_jeremy)
+    temp <- performance("jeremy","cross")
+    if(max_cross < temp) {
+        max_cross <- temp
+        max_cross_iter <- i
+        }
+}
+```
+
+```{r}
+print(max_cross)
+print(max_cross_iter)
+```
+
+```{r,results='hide', echo=FALSE}
+model_jeremy <- multinom(classe~.-user_name, train_jeremy, maxit=85)
+p_cross_jeremy <- predict(model_jeremy, type = "prob", newdata = cross_jeremy)
+```
+
+As you see, we were able to get about 0.5% additional accuracy on cross validation set. There are several reasons why we are not doing the same for other cases. The most important one - it is computationally expensive. Also, there is no guarantee that we will get the same effect on performance on test dataset.
+
+## Prediction on test data
+
+<b>Read data.</b>
+```{r}
+test <- read.csv("pml-testing.csv")
+```
+
+<b>Select proper columns.</b>
+```{r}
+test_selected <- test[,!t_001]
+test_selected <- test_selected[,base]
+```
+
+<b>Normilize.</b>
+```{r}
+test_norm <- scaling(test_selected, train_person_min, train_person_scale)
+```
+
+<b>Separate.</b>
+```{r}
+## Notice that we have at least one record for each person.
+## 8 of 20 are from jeremy, not the best news. 
+test_adelmo <- test_norm[test_norm$user_name=="adelmo",]
+test_carlitos <- test_norm[test_norm$user_name=="carlitos",]
+test_charles <- test_norm[test_norm$user_name=="charles",]
+test_eurico <- test_norm[test_norm$user_name=="eurico",]
+test_jeremy <- test_norm[test_norm$user_name=="jeremy",]
+test_pedro <- test_norm[test_norm$user_name=="pedro",]
+```
+
+<b>Predict.</b>
+```{r}
+p_test_adelmo <- predict(model_adelmo, type = "prob", newdata = test_adelmo)
+p_test_carlitos <- predict(model_carlitos, type = "prob", newdata = test_carlitos)
+p_test_charles <- predict(model_charles, type = "prob", newdata = test_charles)
+p_test_eurico <- predict(model_eurico, type = "prob", newdata = test_eurico)
+p_test_jeremy <- predict(model_jeremy, type = "prob", newdata = test_jeremy)
+p_test_pedro <- predict(model_pedro, type = "prob", newdata = test_pedro)
+```
+
+<b>Results.</b>
+```{r}
+## Clean up a bit first.
+p_test_adelmo[p_test_adelmo < 0.001] <- 0
+p_test_carlitos[p_test_carlitos < 0.001] <- 0
+p_test_charles[p_test_charles < 0.001] <- 0
+p_test_eurico[p_test_eurico < 0.001] <- 0
+p_test_jeremy[p_test_jeremy < 0.001] <- 0
+p_test_pedro[p_test_pedro < 0.001] <- 0
+```
+
+```{r}
+## Numbers at the left side - numbers of the test cases.
+## For adelmo - 4, charles - 10.
+print(p_test_adelmo, digits = 3)
+print(p_test_carlitos, digits = 3)
+print(p_test_charles, digits = 3)
+print(p_test_eurico, digits = 3)
+print(p_test_jeremy, digits = 3)
+print(p_test_pedro, digits = 3)
+```
+
+As you see for most cases decision is obvious, except 8th. I should mention that here used version of model_jeremy with maxit=85. Let's check maxit=100.
+```{r,results='hide'}
+model_jeremy_temp <- multinom(classe~.-user_name, train_jeremy) ## maxit=100 - default
+p_test_jeremy_temp <- predict(model_jeremy_temp, type = "prob", newdata = test_jeremy)
+```
+
+```{r}
+p_test_jeremy_temp[p_test_jeremy_temp < 0.001] <- 0
+print(p_test_jeremy_temp[rownames(p_test_jeremy_temp)==8,], digits = 3)
+```
+
+Well, this output is even worse. But we still can treat them like "A", though this particular case (8th) may worth more accurate investigation (e.g. different approaches like K-mean).
+
+<b>Final results.</b>
+```{r}
+result <- rbind(p_test_adelmo, p_test_carlitos, p_test_charles, p_test_eurico, p_test_jeremy, p_test_pedro)
+rownames(result)[rownames(result)=="p_test_adelmo"] <- 4
+rownames(result)[rownames(result)=="p_test_charles"] <- 10
+result <- result[order(as.numeric(rownames(result))), ]
+apply(result, 1, function(x){names(which.max(x))})
+```
